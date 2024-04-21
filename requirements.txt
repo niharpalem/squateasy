@@ -1,5 +1,5 @@
 mediapipe
 opencv-python==3.4.0.14
 streamlit_webrtc
-streamlit==0.52.1
+streamlit
 
