@@ -1,10 +1,4 @@
-streamlit
-ffmpeg
-joblib
-mediapipe
-numpy
-pandas
-Pillow
-scikit_learn
-opencv_python_headless==4.6.0.66
-streamlit-webrtc
+mediapipe==0.8.3.1
+opencv-python==4.5.1.48
+streamlit==0.82.0
+streamlit_webrtc
