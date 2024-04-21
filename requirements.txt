@@ -7,3 +7,4 @@ pandas
 Pillow
 scikit_learn
 opencv_python_headless
+streamlit-webrtc
