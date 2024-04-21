@@ -6,5 +6,5 @@ numpy
 pandas
 Pillow
 scikit_learn
-opencv-python
+opencv_python_headless==4.6.0.66
 streamlit-webrtc
