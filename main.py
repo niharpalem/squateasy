@@ -1,12 +1,14 @@
 import streamlit as st
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
 import cv2 as cv
 import mediapipe as mp
 
-class VideoTransformer(VideoTransformerBase):
+RTC_CONFIGURATION = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
+
+class ImageTransformer(VideoTransformerBase):
     def __init__(self):
         self.face_mesh = mp.solutions.face_mesh.FaceMesh(
-            static_image_mode=False,
+            static_image_mode=True,
             max_num_faces=1,
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5)
@@ -14,23 +16,12 @@ class VideoTransformer(VideoTransformerBase):
     def transform(self, frame):
         image = frame.to_ndarray(format="bgr24")
 
-        # Resize the image to reduce resolution for faster processing.
-        # Adjust the target width and height as needed.
-        target_width = 640
-        target_height = 480
-        image = cv.resize(image, (target_width, target_height))
-
         # Convert the BGR image to RGB.
         image_rgb = cv.cvtColor(image, cv.COLOR_BGR2RGB)
 
-        # Convert the image to grayscale for faster processing.
-        image_gray = cv.cvtColor(image_rgb, cv.COLOR_RGB2GRAY)
-        # Convert back to RGB (3 channels) to keep mediapipe working, as it expects color images.
-        image_gray_rgb = cv.cvtColor(image_gray, cv.COLOR_GRAY2RGB)
-
         # Process the image and draw landmarks.
-        results = self.face_mesh.process(image_gray_rgb)
-        image_with_landmarks = image_gray_rgb.copy()
+        results = self.face_mesh.process(image_rgb)
+        image_with_landmarks = image_rgb.copy()
 
         # Draw facial landmarks on the image.
         if results.multi_face_landmarks:
@@ -40,11 +31,13 @@ class VideoTransformer(VideoTransformerBase):
                     landmark_list=face_landmarks,
                     connections=mp.solutions.face_mesh.FACEMESH_CONTOURS,
                     landmark_drawing_spec=None,
-                    connection_drawing_spec=mp.solutions.drawing_utils.DrawingSpec(color=(255,255,255), thickness=1, circle_radius=1))
+                    connection_drawing_spec=mp.solutions.drawing_utils.DrawingSpec(color=(255, 255, 255), thickness=1, circle_radius=1))
 
         return cv.cvtColor(image_with_landmarks, cv.COLOR_RGB2BGR)
 
-st.title('Real-time Facial Landmarks Detection with MediaPipe and Streamlit')
+st.title('Facial Landmarks Detection with MediaPipe')
 
-# Using webrtc_streamer to process and display video from the webcam
-webrtc_streamer(key="example", video_processor_factory=VideoTransformer)
+# Button to capture the image
+if st.button('Capture'):
+    # Using webrtc_streamer to capture and process image from the webcam
+    webrtc_streamer(key="example", video_processor_factory=ImageTransformer, rtc_configuration=RTC_CONFIGURATION)
