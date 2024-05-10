@@ -1,166 +1,176 @@
-"""Object detection demo with MobileNet SSD.
-This model and code are based on
-https://github.com/robmarkcole/object-detection-app
-"""
-
-import logging
-import queue
-from pathlib import Path
-from typing import List, NamedTuple
-
-import av
+import time
 import cv2
 import numpy as np
-import streamlit as st
-from streamlit_webrtc import WebRtcMode, webrtc_streamer
+import mediapipe as mp
 
-from sample_utils.download import download_file
-from sample_utils.turn import get_ice_servers
+# Utility functions and classes
+class Utils:
+    @staticmethod
+    def draw_rounded_rect(img, rect_start, rect_end, corner_width, box_color):
+        x1, y1 = rect_start
+        x2, y2 = rect_end
+        w = corner_width
 
-HERE = Path(__file__).parent
-ROOT = HERE
+        # draw filled rectangles
+        cv2.rectangle(img, (x1 + w, y1), (x2 - w, y1 + w), box_color, -1)
+        cv2.rectangle(img, (x1 + w, y2 - w), (x2 - w, y2), box_color, -1)
+        cv2.rectangle(img, (x1, y1 + w), (x1 + w, y2 - w), box_color, -1)
+        cv2.rectangle(img, (x2 - w, y1 + w), (x2, y2 - w), box_color, -1)
+        cv2.rectangle(img, (x1 + w, y1 + w), (x2 - w, y2 - w), box_color, -1)
 
-logger = logging.getLogger(__name__)
+        # draw filled ellipses
+        cv2.ellipse(img, (x1 + w, y1 + w), (w, w), angle=0, startAngle=-90, endAngle=-180, color=box_color, thickness=-1)
+        cv2.ellipse(img, (x2 - w, y1 + w), (w, w), angle=0, startAngle=0, endAngle=-90, color=box_color, thickness=-1)
+        cv2.ellipse(img, (x1 + w, y2 - w), (w, w), angle=0, startAngle=90, endAngle=180, color=box_color, thickness=-1)
+        cv2.ellipse(img, (x2 - w, y2 - w), (w, w), angle=0, startAngle=0, endAngle=90, color=box_color, thickness=-1)
+        return img
 
+    @staticmethod
+    def draw_dotted_line(frame, lm_coord, start, end, line_color):
+        for i in range(start, end + 1, 8):
+            cv2.circle(frame, (lm_coord[0], i), 2, line_color, -1, lineType=cv2.LINE_AA)
+        return frame
 
-MODEL_URL = "https://github.com/robmarkcole/object-detection-app/raw/master/model/MobileNetSSD_deploy.caffemodel"  # noqa: E501
-MODEL_LOCAL_PATH = ROOT / "./models/MobileNetSSD_deploy.caffemodel"
-PROTOTXT_URL = "https://github.com/robmarkcole/object-detection-app/raw/master/model/MobileNetSSD_deploy.prototxt.txt"  # noqa: E501
-PROTOTXT_LOCAL_PATH = ROOT / "./models/MobileNetSSD_deploy.prototxt.txt"
+    @staticmethod
+    def draw_text(img, msg, pos, font_scale, font_thickness, text_color, text_color_bg, font=cv2.FONT_HERSHEY_SIMPLEX, width=8, box_offset=(20, 10)):
+        offset = box_offset
+        x, y = pos
+        text_size, _ = cv2.getTextSize(msg, font, font_scale, font_thickness)
+        text_w, text_h = text_size
+        rec_start = tuple(p - o for p, o in zip(pos, offset))
+        rec_end = tuple(m + n - o for m, n, o in zip((x + text_w, y + text_h), offset, (25, 0)))
 
-CLASSES = [
-    "background",
-    "aeroplane",
-    "bicycle",
-    "bird",
-    "boat",
-    "bottle",
-    "bus",
-    "car",
-    "cat",
-    "chair",
-    "cow",
-    "diningtable",
-    "dog",
-    "horse",
-    "motorbike",
-    "person",
-    "pottedplant",
-    "sheep",
-    "sofa",
-    "train",
-    "tvmonitor",
-]
+        img = Utils.draw_rounded_rect(img, rec_start, rec_end, width, text_color_bg)
 
+        cv2.putText(img, msg, (int(rec_start[0] + 6), int(y + text_h + font_scale - 1)), font, font_scale, text_color, font_thickness, cv2.LINE_AA)
+        return text_size
 
-class Detection(NamedTuple):
-    class_id: int
-    label: str
-    score: float
-    box: np.ndarray
+    @staticmethod
+    def find_angle(p1, p2, ref_pt=np.array([0, 0])):
+        p1_ref = p1 - ref_pt
+        p2_ref = p2 - ref_pt
+        cos_theta = (np.dot(p1_ref, p2_ref)) / (1.0 * np.linalg.norm(p1_ref) * np.linalg.norm(p2_ref))
+        theta = np.arccos(np.clip(cos_theta, -1.0, 1.0))
+        degree = int(180 / np.pi) * theta
+        return int(degree)
 
+    @staticmethod
+    def get_landmark_array(pose_landmark, key, frame_width, frame_height):
+        denorm_x = int(pose_landmark[key].x * frame_width)
+        denorm_y = int(pose_landmark[key].y * frame_height)
+        return np.array([denorm_x, denorm_y])
 
-@st.cache_resource  # type: ignore
-def generate_label_colors():
-    return np.random.uniform(0, 255, size=(len(CLASSES), 3))
+    @staticmethod
+    def get_landmark_features(kp_results, dict_features, feature, frame_width, frame_height):
+        if feature in ['nose', 'left', 'right']:
+            shldr_coord = Utils.get_landmark_array(kp_results, dict_features[feature]['shoulder'], frame_width, frame_height)
+            elbow_coord = Utils.get_landmark_array(kp_results, dict_features[feature]['elbow'], frame_width, frame_height)
+            wrist_coord = Utils.get_landmark_array(kp_results, dict_features[feature]['wrist'], frame_width, frame_height)
+            hip_coord = Utils.get_landmark_array(kp_results, dict_features[feature]['hip'], frame_width, frame_height)
+            knee_coord = Utils.get_landmark_array(kp_results, dict_features[feature]['knee'], frame_width, frame_height)
+            ankle_coord = Utils.get_landmark_array(kp_results, dict_features[feature]['ankle'], frame_width, frame_height)
+            foot_coord = Utils.get_landmark_array(kp_results, dict_features[feature]['foot'], frame_width, frame_height)
+            return shldr_coord, elbow_coord, wrist_coord, hip_coord, knee_coord, ankle_coord, foot_coord
+        else:
+            raise ValueError("feature needs to be either 'nose', 'left' or 'right'")
 
+    @staticmethod
+    def get_mediapipe_pose(static_image_mode=False, model_complexity=1, smooth_landmarks=True, min_detection_confidence=0.5, min_tracking_confidence=0.5):
+        return mp.solutions.pose.Pose(static_image_mode=static_image_mode, model_complexity=model_complexity, smooth_landmarks=smooth_landmarks, min_detection_confidence=min_detection_confidence, min_tracking_confidence=min_tracking_confidence)
 
-COLORS = generate_label_colors()
+# Threshold functions
+def get_thresholds_beginner():
+    _ANGLE_HIP_KNEE_VERT = {
+        'NORMAL': (0, 32),
+        'TRANS': (35, 65),
+        'PASS': (70, 95)
+    }
+    return {
+        'HIP_KNEE_VERT': _ANGLE_HIP_KNEE_VERT,
+        'HIP_THRESH': [10, 50],
+        'ANKLE_THRESH': 45,
+        'KNEE_THRESH': [50, 70, 95],
+        'OFFSET_THRESH': 35.0,
+        'INACTIVE_THRESH': 15.0,
+        'CNT_FRAME_THRESH': 50
+    }
 
-download_file(MODEL_URL, MODEL_LOCAL_PATH, expected_size=23147564)
-download_file(PROTOTXT_URL, PROTOTXT_LOCAL_PATH, expected_size=29353)
+def get_thresholds_pro():
+    _ANGLE_HIP_KNEE_VERT = {
+        'NORMAL': (0, 32),
+        'TRANS': (35, 65),
+        'PASS': (80, 95)
+    }
+    return {
+        'HIP_KNEE_VERT': _ANGLE_HIP_KNEE_VERT,
+        'HIP_THRESH': [15, 50],
+        'ANKLE_THRESH': 30,
+        'KNEE_THRESH': [50, 80, 95],
+        'OFFSET_THRESH': 35.0,
+        'INACTIVE_THRESH': 15.0,
+        'CNT_FRAME_THRESH': 50
+    }
 
+# Main processing class
+class ProcessFrame:
+    def __init__(self, thresholds, flip_frame=False):
+        self.flip_frame = flip_frame
+        self.thresholds = thresholds
+        self.font = cv2.FONT_HERSHEY_SIMPLEX
+        self.linetype = cv2.LINE_AA
+        self.radius = 20
+        self.COLORS = {
+            'blue': (0, 127, 255),
+            'red': (255, 50, 50),
+            'green': (0, 255, 127),
+            'light_green': (100, 233, 127),
+            'yellow': (255, 255, 0),
+            'magenta': (255, 0, 255),
+            'white': (255, 255, 255),
+            'cyan': (0, 255, 255),
+            'light_blue': (102, 204, 255)
+        }
+        self.dict_features = {
+            'left': {
+                'shoulder': 11,
+                'elbow': 13,
+                'wrist': 15,
+                'hip': 23,
+                'knee': 25,
+                'ankle': 27,
+                'foot': 31
+            },
+            'right': {
+                'shoulder': 12,
+                'elbow': 14,
+                'wrist': 16,
+                'hip': 24,
+                'knee': 26,
+                'ankle': 28,
+                'foot': 32
+            },
+            'nose': 0
+        }
+        self.state_tracker = {
+            'state_seq': [],
+            'start_inactive_time': time.perf_counter(),
+            'start_inactive_time_front': time.perf_counter(),
+            'INACTIVE_TIME': 0.0,
+            'INACTIVE_TIME_FRONT': 0.0,
+            'DISPLAY_TEXT': np.full((4,), False),
+            'COUNT_FRAMES': np.zeros((4,), dtype=np.int64),
+            'LOWER_HIPS': False,
+            'INCORRECT_POSTURE': False,
+            'prev_state': None,
+            'curr_state': None,
+            'SQUAT_COUNT': 0,
+            'IMPROPER_SQUAT': 0
+        }
+        self.FEEDBACK_ID_MAP = {
+            0: ('BEND BACKWARDS', 215, (0, 153, 255)),
+            1: ('BEND FORWARD', 215, (0, 153, 255)),
+            2: ('KNEE FALLING OVER TOE', 170, (255, 80, 80)),
+            3: ('SQUAT TOO DEEP', 125, (255, 80, 80))
+        }
 
-# Session-specific caching
-cache_key = "object_detection_dnn"
-if cache_key in st.session_state:
-    net = st.session_state[cache_key]
-else:
-    net = cv2.dnn.readNetFromCaffe(str(PROTOTXT_LOCAL_PATH), str(MODEL_LOCAL_PATH))
-    st.session_state[cache_key] = net
-
-score_threshold = st.slider("Score threshold", 0.0, 1.0, 0.5, 0.05)
-
-# NOTE: The callback will be called in another thread,
-#       so use a queue here for thread-safety to pass the data
-#       from inside to outside the callback.
-# TODO: A general-purpose shared state object may be more useful.
-result_queue: "queue.Queue[List[Detection]]" = queue.Queue()
-
-
-def video_frame_callback(frame: av.VideoFrame) -> av.VideoFrame:
-    image = frame.to_ndarray(format="bgr24")
-
-    # Run inference
-    blob = cv2.dnn.blobFromImage(
-        cv2.resize(image, (300, 300)), 0.007843, (300, 300), 127.5
-    )
-    net.setInput(blob)
-    output = net.forward()
-
-    h, w = image.shape[:2]
-
-    # Convert the output array into a structured form.
-    output = output.squeeze()  # (1, 1, N, 7) -> (N, 7)
-    output = output[output[:, 2] >= score_threshold]
-    detections = [
-        Detection(
-            class_id=int(detection[1]),
-            label=CLASSES[int(detection[1])],
-            score=float(detection[2]),
-            box=(detection[3:7] * np.array([w, h, w, h])),
-        )
-        for detection in output
-    ]
-
-    # Render bounding boxes and captions
-    for detection in detections:
-        caption = f"{detection.label}: {round(detection.score * 100, 2)}%"
-        color = COLORS[detection.class_id]
-        xmin, ymin, xmax, ymax = detection.box.astype("int")
-
-        cv2.rectangle(image, (xmin, ymin), (xmax, ymax), color, 2)
-        cv2.putText(
-            image,
-            caption,
-            (xmin, ymin - 15 if ymin - 15 > 15 else ymin + 15),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            color,
-            2,
-        )
-
-    result_queue.put(detections)
-
-    return av.VideoFrame.from_ndarray(image, format="bgr24")
-
-
-webrtc_ctx = webrtc_streamer(
-    key="object-detection",
-    mode=WebRtcMode.SENDRECV,
-    rtc_configuration={
-        "iceServers": get_ice_servers(),
-        "iceTransportPolicy": "relay",
-    },
-    video_frame_callback=video_frame_callback,
-    media_stream_constraints={"video": True, "audio": False},
-    async_processing=True,
-)
-
-if st.checkbox("Show the detected labels", value=True):
-    if webrtc_ctx.state.playing:
-        labels_placeholder = st.empty()
-        # NOTE: The video transformation with object detection and
-        # this loop displaying the result labels are running
-        # in different threads asynchronously.
-        # Then the rendered video frames and the labels displayed here
-        # are not strictly synchronized.
-        while True:
-            result = result_queue.get()
-            labels_placeholder.table(result)
-
-st.markdown(
-    "This demo uses a model and code from "
-    "https://github.com/robmarkcole/object-detection-app. "
-    "Many thanks to the project."
-)
+    # Add other methods here to complete the functionality
