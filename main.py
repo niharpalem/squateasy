@@ -1,6 +1,5 @@
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
-#import cv2
 import numpy as np
 import mediapipe as mp
 import time
